@@ -1,17 +1,13 @@
-"""Container entrypoint for the reference implementations.
-
-The harness runs every image with `-e TRACK=<a|b|c|d>`, so one reference
-image serves all four tracks.
-"""
+"""Container entrypoint for Speed Demon Track A."""
 import importlib
 import os
 import sys
 
-MODULES = {"a": "a_ingest", "b": "b_index", "c": "c_join", "d": "d_traverse"}
+MODULES = {"a": "a_ingest"}
 
 
 def run():
-    track = os.environ.get("TRACK", "").strip().lower()
+    track = os.environ.get("TRACK", "a").strip().lower()
     if track not in MODULES:
         sys.stderr.write(f"TRACK must be one of {sorted(MODULES)}, got {track!r}\n")
         return 2

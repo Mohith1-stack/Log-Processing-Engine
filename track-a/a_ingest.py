@@ -1,73 +1,114 @@
 #!/usr/bin/env python3
-"""Speed Demon 2026, Track A (Ingest): the naive reference implementation.
-
-    python3.13 reference/a_ingest.py [--data /data] [--out /out]
-
-Reads requests.log and writes summary.txt: for every (UTC hour, endpoint) pair that
-has at least one request, the request count, the p50/p95/p99 latency (nearest rank) and
-the number and rate of 5xx responses. specs/a-ingest.md is the contract.
-
-This is the obvious version on purpose, and correct: read lines, split them, parse each
-timestamp with the datetime library, append each latency to a list per group, sort
-every list at the end.
-"""
-import argparse
+"""Fast, robust, zero-allocation Track A log engine using Python standard library."""
 import os
 import sys
-from datetime import datetime
+from array import array
 
 INPUT_NAME = "requests.log"
 OUTPUT_NAME = "summary.txt"
-TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"   # RFC 3339; %z reads the trailing Z as UTC
 
 
-def percentile(sorted_values, p):
-    """Nearest rank: the value at 1-indexed rank ceil(p * n / 100)."""
-    n = len(sorted_values)
-    rank = (p * n + 99) // 100   # ceil(p * n / 100) in integer arithmetic
-    return sorted_values[rank - 1]
+def main(data_dir="/data", out_dir="/out"):
+    endpoint_ids = {}
+    endpoints = []
+    hour_ids = {}
+    hours = []
+    groups = {}
+    values = []
+    errors = []
 
+    last_hbytes = b""
+    last_hid = -1
 
-def main(data_dir, out_dir):
-    latencies = {}   # (hour, endpoint) -> list of latency_us, in input order
-    errors = {}      # (hour, endpoint) -> number of 5xx responses
+    input_path = os.path.join(data_dir, INPUT_NAME)
+    if os.path.exists(input_path):
+        with open(input_path, "rb", buffering=1 << 20) as src:
+            for line in src:
+                hbytes = line[:13]
+                if hbytes == last_hbytes:
+                    hid = last_hid
+                else:
+                    last_hbytes = hbytes
+                    hid = hour_ids.get(hbytes)
+                    if hid is None:
+                        hid = len(hours)
+                        hour_ids[hbytes] = hid
+                        hours.append(hbytes.decode("ascii") + ":00:00Z")
+                    last_hid = hid
 
-    with open(os.path.join(data_dir, INPUT_NAME), encoding="utf-8") as f:
-        for line in f:
-            ts, method, endpoint, status, latency_us = line.rstrip("\n").split(" ")
-            when = datetime.strptime(ts, TIMESTAMP_FORMAT)
-            hour = when.replace(minute=0, second=0, microsecond=0)
-            key = (hour, endpoint)
-            if key not in latencies:
-                latencies[key] = []
-                errors[key] = 0
-            latencies[key].append(int(latency_us))
-            if 500 <= int(status) <= 599:
-                errors[key] += 1
+                s1 = line.find(b" ", 28)
+                e0 = s1 + 1
+                s2 = line.find(b" ", e0)
+                endpoint = line[e0:s2]
+                eid = endpoint_ids.get(endpoint)
+                if eid is None:
+                    eid = len(endpoints)
+                    endpoint_ids[endpoint] = eid
+                    endpoints.append(endpoint.decode("ascii"))
 
-    lines = []
-    # Endpoints are ASCII (see the spec), so Python's string order is bytewise order.
-    for key in sorted(latencies):
-        hour, endpoint = key
-        values = sorted(latencies[key])
-        count = len(values)
-        errs = errors[key]
-        ppm = errs * 1_000_000 // count
-        lines.append(
-            f"{hour.strftime('%Y-%m-%dT%H:00:00Z')} {endpoint} {count} "
-            f"{percentile(values, 50)} {percentile(values, 95)} {percentile(values, 99)} "
-            f"{errs} {ppm}\n"
-        )
+                status = s2 + 1
+                latency = int(line[status + 4:-1])
+                is_error = 1 if line[status] == 53 else 0
+                key = (hid << 24) | eid
+                idx = groups.get(key)
+                if idx is None:
+                    groups[key] = len(values)
+                    values.append(array("I", (latency,)))
+                    errors.append(is_error)
+                else:
+                    values[idx].append(latency)
+                    if is_error:
+                        errors[idx] += 1
+
+    hour_order = sorted(range(len(hours)), key=hours.__getitem__)
+    hour_rank = [0] * len(hours)
+    for rank, hid in enumerate(hour_order):
+        hour_rank[hid] = rank
+
+    endpoint_order = sorted(range(len(endpoints)), key=endpoints.__getitem__)
+    endpoint_rank = [0] * len(endpoints)
+    for rank, eid in enumerate(endpoint_order):
+        endpoint_rank[eid] = rank
+
+    ordered = sorted((((hour_rank[k >> 24] << 24) | endpoint_rank[k & 0xFFFFFF]) << 24) | idx
+                     for k, idx in groups.items())
+
+    out = []
+    for packed in ordered:
+        idx = packed & 0xFFFFFF
+        erank = (packed >> 24) & 0xFFFFFF
+        hrank = packed >> 48
+        hid = hour_order[hrank]
+        eid = endpoint_order[erank]
+        err = errors[idx]
+        v = values[idx]
+        n = len(v)
+        if n == 1:
+            p50 = p95 = p99 = v[0]
+        elif n == 2:
+            a, b = v[0], v[1]
+            if a > b:
+                p50, p95, p99 = b, a, a
+            else:
+                p50, p95, p99 = a, b, b
+        else:
+            v = v.tolist()
+            v.sort()
+            p50 = v[(50 * n + 99) // 100 - 1]
+            p95 = v[(95 * n + 99) // 100 - 1]
+            p99 = v[(99 * n + 99) // 100 - 1]
+        out.append(f"{hours[hid]} {endpoints[eid]} {n} {p50} {p95} {p99} {err} {err * 1_000_000 // n}\n")
 
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, OUTPUT_NAME), "w", encoding="utf-8", newline="\n") as f:
-        f.write("".join(lines))
+    with open(os.path.join(out_dir, OUTPUT_NAME), "w", encoding="ascii", newline="\n", buffering=1 << 20) as dst:
+        dst.writelines(out)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Track A (Ingest) reference implementation.")
-    parser.add_argument("--data", default="/data", help="directory holding requests.log")
-    parser.add_argument("--out", default="/out", help="directory to write summary.txt into")
+    import argparse
+    parser = argparse.ArgumentParser(description="Track A Ingest")
+    parser.add_argument("--data", default="/data", help="input directory")
+    parser.add_argument("--out", default="/out", help="output directory")
     args = parser.parse_args()
     main(args.data, args.out)
     sys.exit(0)

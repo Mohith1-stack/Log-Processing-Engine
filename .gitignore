@@ -1,2 +1,10 @@
 .out/
 data/
+out/
+test_run/
+.data/
+__pycache__/
+*.pyc
+speed-demon-starter/
+speed-demon-2026/
+verify_local.py

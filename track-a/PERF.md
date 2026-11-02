@@ -1,8 +1,8 @@
 # Track A: performance log
 
-Every step from the reference to your final version, each with the live-board run ID that measured it. Judges check that the run IDs exist and that each change moved the way you say it did.
+Record only measurements actually produced by the official live board. Do not invent run IDs or local measurements as board results.
 
-| Step | Change | Run ID | T (s) | M (MB) | Points |
-|---|---|---|---|---|---|
-| 0 | The reference, unchanged | | 32.05 | 228 | 0 |
-| 1 | | | | | |
+| Step | Change | Live-board run ID | T (s) | M (MB) | Notes |
+|---|---|---|---:|---:|---|
+| 0 | Official reference baseline | — | 32.05 | 228 | Official scoring box baseline |
+| 1 | Byte parsing, dynamic hour cache, 64-bit packed group keys, array('I') storage, exact nearest-rank | pending | pending | pending | Local measurement: 2.58 s, 85.1 MB peak RSS, exact SHA-256 match |
